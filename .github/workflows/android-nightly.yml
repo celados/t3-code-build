@@ -26,7 +26,7 @@ concurrency:
 
 env:
   UPSTREAM: https://github.com/pingdotgg/t3code.git
-  BUILDER_IMAGE: __BUILDER_IMAGE__
+  BUILDER_IMAGE: docker.io/huodong/t3code-android-builder@sha256:54ee9068801c6e342feffcd645a62528ded4fd15e8445f3e984248266a58f610
   PUBLIC_BASE_URL: https://static.celados.com
 
 jobs:
