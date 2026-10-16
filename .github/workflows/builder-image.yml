@@ -1,0 +1,53 @@
+name: Builder image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - builder/**
+      - .github/workflows/builder-image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Publishes a registry tag; a cancelled push would leave the tag half-moved.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: docker.io/huodong/t3code-android-builder
+
+jobs:
+  publish:
+    runs-on: celados-linux
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # The pod egresses only through oh's proxy; RUN steps need it as build args.
+      - name: Build and push
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx build builder \
+            --platform linux/amd64 \
+            --build-arg HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-}}" \
+            --build-arg HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-}}" \
+            --build-arg NO_PROXY="${NO_PROXY:-${no_proxy:-}}" \
+            --label org.opencontainers.image.source="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --tag "$IMAGE:latest" --tag "$IMAGE:${GITHUB_SHA::7}" \
+            --metadata-file "$RUNNER_TEMP/build-meta.json" \
+            --push
+          digest=$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/build-meta.json")
+          test "${digest#sha256:}" != "$digest"
+          echo "Pin in .github/workflows/android-nightly.yml: \`BUILDER_IMAGE: $IMAGE@$digest\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "$IMAGE@$digest"

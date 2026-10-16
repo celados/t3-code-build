@@ -1,0 +1,109 @@
+name: Android nightly
+
+on:
+  schedule:
+    # GitHub cron is UTC: 19:37 UTC is 03:37 Asia/Shanghai.
+    - cron: "37 19 * * *"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Upstream ref to build
+        required: false
+        default: main
+      force:
+        description: Rebuild even if latest.json already has this upstream commit
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+# Publishes latest.apk/latest.json; an interrupted run must not race the next one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: https://github.com/pingdotgg/t3code.git
+  BUILDER_IMAGE: __BUILDER_IMAGE__
+  PUBLIC_BASE_URL: https://static.celados.com
+
+jobs:
+  nightly:
+    if: github.ref == 'refs/heads/main'
+    runs-on: celados-linux-large
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve upstream commit
+        id: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="${{ inputs.ref || 'main' }}"
+          sha=$(git ls-remote "$UPSTREAM" "refs/heads/$ref" "refs/tags/$ref" | head -1 | cut -f1)
+          [[ -n "$sha" ]] || sha=$ref
+          published=$(curl -fsS "$PUBLIC_BASE_URL/t3-code/android/latest.json" | jq -r .upstream_sha || true)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          if [[ "$sha" == "$published" && "${{ inputs.force }}" != "true" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Upstream $sha is already published; nothing to do." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Fetch upstream
+        if: steps.upstream.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init -q "$RUNNER_TEMP/t3code"
+          git -C "$RUNNER_TEMP/t3code" fetch -q --depth=1 "$UPSTREAM" "${{ steps.upstream.outputs.sha }}"
+          git -C "$RUNNER_TEMP/t3code" checkout -q --detach FETCH_HEAD
+
+      - name: Build APK
+        if: steps.upstream.outputs.skip != 'true'
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          keys="$RUNNER_TEMP/keys"
+          mkdir -m 700 "$keys"
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$keys/nightly.p12"
+          mkdir -p "$RUNNER_TEMP/out"
+          # Workspace paths are bind-mounted at the same location; the build image holds the
+          # whole Android/Node toolchain so the runner image stays generic.
+          docker run --rm \
+            -e HTTP_PROXY -e HTTPS_PROXY -e NO_PROXY -e http_proxy -e https_proxy -e no_proxy \
+            -e NODE_USE_ENV_PROXY=1 \
+            -e ANDROID_KEYSTORE="$keys/nightly.p12" \
+            -e ANDROID_KEYSTORE_PASSWORD -e ANDROID_KEY_PASSWORD -e ANDROID_KEY_ALIAS \
+            -v "$RUNNER_TEMP:$RUNNER_TEMP" -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
+            "$BUILDER_IMAGE" bash -c '
+              git config --global --add safe.directory "$1"
+              "$3/scripts/build-android.sh" "$1" "$2"
+            ' _ "$RUNNER_TEMP/t3code" "$RUNNER_TEMP/out" "$GITHUB_WORKSPACE"
+          rm -rf "$keys"
+
+      - name: Publish to R2
+        if: steps.upstream.outputs.skip != 'true'
+        shell: bash
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          scripts/publish-r2.sh "$RUNNER_TEMP/out"
+          {
+            echo "### T3 Code Preview nightly"
+            echo
+            echo "- APK: $PUBLIC_BASE_URL/t3-code/android/latest.apk"
+            echo "- upstream: pingdotgg/t3code@$(jq -r .upstream_sha "$RUNNER_TEMP/out/latest.json")"
+            echo "- version: $(jq -r .version_name "$RUNNER_TEMP/out/latest.json")"
+          } >> "$GITHUB_STEP_SUMMARY"
