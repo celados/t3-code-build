@@ -11,7 +11,7 @@ Nightly Android APK of [pingdotgg/t3code](https://github.com/pingdotgg/t3code) b
 ## Layout
 
 - `scripts/build-android.sh` — upstream checkout → signed APK + `build.json`. Runs inside the builder image.
-- `scripts/publish-r2.sh` — uploads to `celados-static` (`t3-code/android/`), repoints `latest.*`.
+- `scripts/publish-r2.sh` — uploads to `celados-static` (`t3-code/android/`), repoints `latest.*`, keeps the newest 14 builds.
 - `builder/Dockerfile` — JDK 17, Android SDK/NDK, Node 24. Published by `builder-image.yml` to
   `docker.io/huodong/t3code-android-builder`; the nightly pins it by digest.
 - `fixups/*.sh` — temporary repairs for upstream breakage, run after `pnpm install`. Each one must
