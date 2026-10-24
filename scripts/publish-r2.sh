@@ -19,7 +19,12 @@ apk_name=$(jq -r .apk "$out/build.json")
 apk="$out/$apk_name"
 sha256=$(sha256sum "$apk" | cut -d' ' -f1)
 
-s3() { curl -fsS --retry 3 --aws-sigv4 "aws:amz:auto:s3" --user "$R2_ACCESS_KEY_ID:$R2_SECRET_ACCESS_KEY" "$@"; }
+# A stalled transfer (oh's egress drops to a few KB/s at peak) fails after 60s below 100KB/s and is
+# retried, instead of hanging until the job timeout. Timeouts count as transient for --retry.
+s3() {
+  curl -fsS --retry 5 --retry-delay 10 --connect-timeout 20 --speed-limit 102400 --speed-time 60 \
+    --aws-sigv4 "aws:amz:auto:s3" --user "$R2_ACCESS_KEY_ID:$R2_SECRET_ACCESS_KEY" "$@"
+}
 put() { # <file> <key> <content-type> <cache-control>
   s3 -o /dev/null -H "content-type: $3" -H "cache-control: $4" -T "$1" "$R2_ENDPOINT/$R2_BUCKET/$2"
 }
@@ -29,8 +34,12 @@ put "$apk" "$prefix/builds/$apk_name" application/vnd.android.package-archive "p
 jq --arg sha256 "$sha256" --arg url "$PUBLIC_BASE_URL/$prefix/builds/$apk_name" \
   '. + {sha256: $sha256, url: $url}' "$out/build.json" > "$out/latest.json"
 
+# latest.apk is a server-side copy of the build just uploaded: the APK crosses oh's egress once.
+s3 -o /dev/null -X PUT -H "x-amz-copy-source: /$R2_BUCKET/$prefix/builds/$apk_name" \
+  -H "x-amz-metadata-directive: REPLACE" \
+  -H "content-type: application/vnd.android.package-archive" -H "cache-control: no-cache" \
+  "$R2_ENDPOINT/$R2_BUCKET/$prefix/latest.apk"
 # latest.json goes last: it is what the next run reads to decide whether to rebuild.
-put "$apk" "$prefix/latest.apk" application/vnd.android.package-archive "no-cache"
 put "$out/latest.json" "$prefix/latest.json" application/json "no-cache"
 
 # Read back through the public domain, not the S3 endpoint we just wrote to.
